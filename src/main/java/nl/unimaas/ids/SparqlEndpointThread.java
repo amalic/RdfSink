@@ -2,11 +2,12 @@ package nl.unimaas.ids;
 
 import java.io.IOException;
 import java.io.StringReader;
+import java.util.concurrent.TimeUnit;
 
-import org.eclipse.rdf4j.repository.RepositoryException;
+import org.eclipse.rdf4j.RDF4JException;
+import org.eclipse.rdf4j.repository.RepositoryConnection;
 import org.eclipse.rdf4j.repository.sparql.SPARQLRepository;
 import org.eclipse.rdf4j.rio.RDFFormat;
-import org.eclipse.rdf4j.rio.RDFParseException;
 import org.eclipse.rdf4j.rio.Rio;
 
 import com.eclipsesource.json.Json;
@@ -19,6 +20,7 @@ class SparqlEndpointThread extends Thread {
 	private String updateEndpoint = null;
 	private String username = null;
 	private String password = null;
+	private String module = null;
 	private SPARQLRepository repository;
 
 	volatile boolean terminated = false;
@@ -29,17 +31,26 @@ class SparqlEndpointThread extends Thread {
 
 
 
-	public SparqlEndpointThread(Queue queue, String endpoint, String updateEndpoint, String username, String password) {
+	public SparqlEndpointThread(Queue queue, String endpoint, String updateEndpoint, String username, String password, String module) {
 		this.queue = queue;
 		this.endpoint = endpoint;
 		this.updateEndpoint = updateEndpoint;
 		this.username = username;
 		this.password = password;
+		if (module == null) {
+			this.module = "";
+		} else {
+			this.module = module.toLowerCase();
+		}
 	}
 
 	@Override
 	public void run() {
-		SPARQLRepository repo = null;
+		try {
+			init();
+		} catch (RDF4JException | IOException ex) {
+			ex.printStackTrace();
+		}
 		while(!terminated) {
 			try {
 				if (!queue.isEmpty()) {
@@ -49,12 +60,10 @@ class SparqlEndpointThread extends Thread {
 					String contentType = arr.get(0).asString();
 					String payload = arr.get(1).asString();
 
-					repo = getRepository();
-
 					RDFFormat rdfFormat = Rio.getParserFormatForMIMEType(contentType).get();
 					try {
-						repo.getConnection().add(new StringReader(payload), "http://null/", rdfFormat);
-					} catch (RDFParseException | IOException | RepositoryException e ) {
+						process(payload, rdfFormat);
+					} catch (RDF4JException | IOException e ) {
 						// add item to end of queue if something went wrong and wait 5s
 						queue.push(queueEntry);
 						e.printStackTrace();
@@ -68,8 +77,38 @@ class SparqlEndpointThread extends Thread {
 				e.printStackTrace();
 			}
 		}
-		if(repo != null && repo.isInitialized())
+		SPARQLRepository repo = getRepository();
+		if(repo != null && repo.isInitialized()) {
 			repo.shutDown();
+		}
+	}
+
+	private void init() throws RDF4JException, IOException {
+		// Wait a bit to make sure endpoint is ready:
+		try {
+			TimeUnit.SECONDS.sleep(60);
+		} catch (InterruptedException ex) {}
+		RepositoryConnection conn = getRepository().getConnection();
+		try {
+			if (module.equals("nanopub")) {
+				NanopubModule.init(conn);
+			}
+		} finally {
+			conn.close();
+		}
+	}
+
+	private void process(String payload, RDFFormat format) throws RDF4JException, IOException {
+		RepositoryConnection conn = getRepository().getConnection();
+		try {
+			if (module.equals("nanopub")) {
+				NanopubModule.process(conn, payload, format);
+			} else {
+				conn.add(new StringReader(payload), "http://null/", format);
+			}
+		} finally {
+			conn.close();
+		}
 	}
 
 	private SPARQLRepository getRepository() {
@@ -83,4 +122,5 @@ class SparqlEndpointThread extends Thread {
 		}
 		return repository;
 	}
+
 }
